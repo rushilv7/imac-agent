@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Callable
 
@@ -23,7 +22,6 @@ POLL_SECONDS = 1.0
 ACTION_SCRIPTS = {
     "restart:imac-demo": REPO_ROOT / "scripts" / "imac-demo-restart.sh",
     "restart:imac-ops": REPO_ROOT / "scripts" / "imac-ops-restart.sh",
-    "restart:imac-bot": REPO_ROOT / "scripts" / "imac-bot-restart.sh",
 }
 
 
