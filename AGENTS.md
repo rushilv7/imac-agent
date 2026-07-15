@@ -124,3 +124,38 @@ Hermes must not:
 - modify firewall or Tailscale configuration through this API
 - stop, disable, or delete the service without explicit approval
 <!-- IMAC_OPS_END -->
+
+<!-- PROJECT_OPERATIONS_START -->
+## Registered Project Operations
+
+Project allowlist:
+
+- `config/projects.json`
+
+Hermes may operate only on projects registered in this file.
+
+### Approved read-only operation
+
+- `scripts/registered-project-status.sh <project-name>`
+
+Hermes may use this without additional approval.
+
+### Approved controlled operation
+
+- `scripts/project-fetch.sh <project-name>`
+
+This command may update Git remote metadata but must not modify the working tree.
+
+### Restrictions
+
+Hermes must not:
+
+- operate on unregistered project paths
+- construct arbitrary filesystem paths from project names
+- run `git reset --hard`
+- run `git clean`
+- force-push
+- delete branches
+- automatically merge or pull code without explicit approval
+- deploy code without explicit approval
+<!-- PROJECT_OPERATIONS_END -->
