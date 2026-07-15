@@ -126,7 +126,6 @@ def ask_hermes(question: str) -> str:
     clean_question = question.strip()
     if not clean_question:
         raise HermesBridgeError("Ask a question after /ask.")
-
     if len(clean_question) > MAX_QUESTION_CHARS:
         raise HermesBridgeError(
             f"Question is too long. Maximum: {MAX_QUESTION_CHARS} characters."
@@ -143,7 +142,7 @@ Rules:
 - Do not modify files, services, Git state, configuration, networking, firewall rules, packages, or system state.
 - Do not request or reveal secrets, tokens, keys, passwords, or environment-file contents.
 - Treat the server snapshot below as the authoritative local context for this request.
-- You may use web research only when it materially helps answer the question.
+- You may use only the tools provided by the Hermes `safe` toolset.
 - If the snapshot is insufficient, state the exact additional read-only check that would be useful.
 - Be concise, practical, and explicit about uncertainty.
 - Do not claim that you changed anything.
@@ -164,10 +163,12 @@ Current read-only server snapshot:
         result = subprocess.run(
             [
                 hermes_bin,
-                "--toolsets",
-                "web",
-                "--oneshot",
+                "chat",
+                "-q",
                 prompt,
+                "-Q",
+                "--toolsets",
+                "safe",
             ],
             cwd=REPO_ROOT,
             env=child_env,
@@ -186,12 +187,19 @@ Current read-only server snapshot:
         ) from exc
 
     if result.returncode != 0:
+        local_error = result.stderr.strip() or result.stdout.strip()
         raise HermesBridgeError(
             f"Hermes exited with code {result.returncode}. "
-            "Check imac-bot service logs for the local failure context."
+            f"{local_error[:800]}"
         )
 
-    response = result.stdout.strip()
+    lines = result.stdout.strip().splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1].startswith("session_id:"):
+        lines.pop()
+
+    response = "\n".join(lines).strip()
     if not response:
         raise HermesBridgeError("Hermes returned an empty response.")
 
