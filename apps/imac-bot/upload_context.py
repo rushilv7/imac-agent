@@ -4,6 +4,7 @@ import csv
 import io
 import re
 import sqlite3
+import subprocess
 from pathlib import Path
 
 STATE_DB = Path.home() / ".local" / "state" / "imac-bot" / "state.db"
@@ -102,10 +103,38 @@ def _extract_upload(upload_id: int) -> str:
         body = _read_csv(path)
     elif suffix in {".txt", ".md", ".json", ".log", ".tsv", ".yaml", ".yml"} or mime_type.startswith("text/"):
         body = _read_text(path)
+    elif suffix == ".pdf" or mime_type == "application/pdf":
+        try:
+            result = subprocess.run(
+                ["pdftotext", "-layout", str(path), "-"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except FileNotFoundError:
+            body = (
+                "PDF extraction is unavailable because pdftotext is not installed."
+            )
+        except subprocess.TimeoutExpired:
+            body = "PDF extraction timed out."
+        else:
+            if result.returncode != 0:
+                body = (
+                    "PDF extraction failed: "
+                    + (result.stderr.strip() or "unknown pdftotext error")
+                )
+            else:
+                extracted = result.stdout.strip()
+                body = (
+                    extracted[:MAX_TEXT_CHARS]
+                    if extracted
+                    else "PDF contained no extractable text."
+                )
     else:
         body = (
-            "Binary file detected. This first analysis bridge does not extract "
-            "the contents of this file type yet. Analyze the available metadata only."
+            "Binary file detected. This file type is not supported for "
+            "content extraction yet. Analyze the available metadata only."
         )
 
     return header + "\nExtracted content:\n" + body
