@@ -50,3 +50,34 @@ Do not:
 - push code or deploy services without approval
 
 When uncertain, stop and ask.
+
+<!-- MANAGED_SERVICES_START -->
+## Managed Services
+
+### imac-demo.service
+
+Purpose:
+- Test and validate systemd-based service management.
+- Demonstrate how Hermes can inspect, diagnose, and restart an approved service.
+
+Service type:
+- systemd user service
+- Runs as the `rushil` user
+- Does not require unrestricted root access
+
+Approved read-only operations:
+- `scripts/imac-demo-status.sh`
+- `scripts/imac-demo-logs.sh`
+
+Approved controlled write operation:
+- `scripts/imac-demo-restart.sh`
+
+Rules:
+- Hermes may inspect status and logs without additional approval.
+- Hermes may restart `imac-demo.service` only through `scripts/imac-demo-restart.sh`.
+- Hermes must explain why a restart is necessary before executing it unless the user explicitly requested the restart.
+- Hermes must verify the service status and recent logs after restarting it.
+- Hermes must not modify the systemd unit definition without explicit approval.
+- Hermes must not stop, disable, delete, or replace the service without explicit approval.
+- Hermes must not use arbitrary `systemctl` commands when an approved script exists.
+<!-- MANAGED_SERVICES_END -->
