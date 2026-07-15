@@ -19,6 +19,7 @@ REPO = Path.home() / "projects" / "imac-agent"
 ALLOWED_USER_SERVICES = [
     "imac-demo.service",
     "imac-ops.service",
+    "imac-bot.service",
 ]
 
 

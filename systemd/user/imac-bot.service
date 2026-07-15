@@ -1,0 +1,17 @@
+[Unit]
+Description=iMac Telegram Operations Bot
+After=imac-ops.service
+Wants=imac-ops.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/rushil/projects/imac-agent/apps/imac-bot
+EnvironmentFile=/home/rushil/.config/imac-bot/env
+ExecStart=/usr/bin/python3 /home/rushil/projects/imac-agent/apps/imac-bot/bot.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
