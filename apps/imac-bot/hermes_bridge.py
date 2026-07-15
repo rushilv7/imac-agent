@@ -20,4 +20,20 @@ HERMES_TIMEOUT_SECONDS = 300
 
 # Only scripts already designated as read-only in AGENTS.md.
 READ_ONLY_SCRIPTS = (
-    REPO_ROOT / "scripts" / "server
+    REPO_ROOT / "scripts" / "server-status.sh",
+    REPO_ROOT / "scripts" / "check-services.sh",
+)
+
+
+class HermesBridgeError(RuntimeError):
+    """Expected failure while collecting context or invoking Hermes."""
+
+
+def _resolve_hermes_bin() -> str:
+    configured = os.environ.get("HERMES_BIN", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        raise HermesBridgeError(
+            "HERMES_BIN is configured but is not an executable file."
