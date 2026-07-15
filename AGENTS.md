@@ -81,3 +81,46 @@ Rules:
 - Hermes must not stop, disable, delete, or replace the service without explicit approval.
 - Hermes must not use arbitrary `systemctl` commands when an approved script exists.
 <!-- MANAGED_SERVICES_END -->
+
+<!-- IMAC_OPS_START -->
+## imac-ops Managed Service
+
+### Purpose
+
+`imac-ops.service` is the local operations API for this server.
+
+It listens only on:
+
+`127.0.0.1:8787`
+
+### Approved read-only operations
+
+- `scripts/imac-ops-status.sh`
+- `scripts/imac-ops-logs.sh`
+- `GET http://127.0.0.1:8787/health`
+- `GET http://127.0.0.1:8787/status`
+- `GET http://127.0.0.1:8787/services`
+- `GET http://127.0.0.1:8787/projects/imac-agent`
+
+Hermes may use these without additional approval.
+
+### Approved controlled write operation
+
+- `scripts/imac-ops-restart.sh`
+
+Before restarting, Hermes must:
+1. Explain why a restart is recommended.
+2. Use only the approved restart script.
+3. Verify API health afterward.
+4. Inspect logs if recovery fails.
+
+### Restrictions
+
+Hermes must not:
+- expose port 8787 publicly
+- change the bind address from 127.0.0.1 without explicit approval
+- add arbitrary shell-command execution endpoints
+- give the API unrestricted sudo
+- modify firewall or Tailscale configuration through this API
+- stop, disable, or delete the service without explicit approval
+<!-- IMAC_OPS_END -->
