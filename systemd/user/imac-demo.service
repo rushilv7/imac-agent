@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/rushil/services/imac-demo/app.py
+ExecStart=/usr/bin/python3 /home/rushil/projects/imac-agent/apps/imac-demo/app.py
 Restart=on-failure
 RestartSec=5
 
