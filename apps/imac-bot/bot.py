@@ -8,6 +8,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from hermes_bridge import HermesBridgeError, ask_hermes
+
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 ALLOWED_USER_ID_RAW = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "").strip()
@@ -140,8 +142,9 @@ def help_text() -> str:
         "/status - Show server resource status\n"
         "/services - Show managed services\n"
         "/repo - Show imac-agent Git status\n"
+        "/ask <question> - Ask Hermes in read-only mode\n"
         "/help - Show available commands\n\n"
-        "This bot is currently read-only."
+        "Hermes /ask requests are currently read-only."
     )
 
 
@@ -241,8 +244,11 @@ def handle_message(message: dict[str, Any]) -> None:
         )
         return
 
-    command = text.strip().split(maxsplit=1)[0].lower()
-    command = command.split("@", maxsplit=1)[0]
+    stripped = text.strip()
+    parts = stripped.split(maxsplit=1)
+    raw_command = parts[0].lower() if parts else ""
+    command = raw_command.split("@", maxsplit=1)[0]
+    argument = parts[1].strip() if len(parts) > 1 else ""
 
     try:
         if command in {"/start", "/help"}:
@@ -255,6 +261,18 @@ def handle_message(message: dict[str, Any]) -> None:
             response = command_services()
         elif command == "/repo":
             response = command_repo()
+        elif command == "/ask":
+            if not argument:
+                response = "Usage: /ask <question>"
+            else:
+                send_message(
+                    chat_id,
+                    "Hermes is investigating in read-only mode...",
+                )
+                try:
+                    response = ask_hermes(argument)
+                except HermesBridgeError as exc:
+                    response = f"Hermes request failed:\n{exc}"
         else:
             response = (
                 "Unknown command.\n\n"
