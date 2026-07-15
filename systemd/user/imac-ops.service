@@ -1,0 +1,12 @@
+[Unit]
+Description=iMac Operations API
+
+[Service]
+Type=simple
+WorkingDirectory=/home/rushil/projects/imac-agent/apps/imac-ops
+ExecStart=/home/rushil/projects/imac-agent/apps/imac-ops/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
