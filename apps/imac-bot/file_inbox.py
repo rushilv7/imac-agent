@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from state_store import record_upload
+from state_store import record_upload, set_active_uploads
 
 INBOX_DIR = Path.home() / "inbox" / "telegram"
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -22,8 +22,10 @@ def _safe_name(name: str) -> str:
 def save_document(
     document: dict[str, Any],
     *,
+    chat_id: int | None = None,
     telegram_request: Callable[..., Any],
     bot_token: str,
+    set_as_active: bool = True,
 ) -> dict[str, Any]:
     size = int(document.get("file_size") or 0)
     if size <= 0:
@@ -71,6 +73,11 @@ def save_document(
         mime_type=document.get("mime_type"),
         size_bytes=destination.stat().st_size,
     )
+
+    if set_as_active and chat_id is not None:
+        # Requirement: every uploaded file becomes the active file for this chat.
+        # Multi-file context is supported via /add_file.
+        set_active_uploads(chat_id, [upload_id])
 
     return {
         "upload_id": upload_id,

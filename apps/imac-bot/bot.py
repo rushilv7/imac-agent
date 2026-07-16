@@ -13,16 +13,21 @@ from file_inbox import save_document
 from job_runner import JobRunner
 from state_store import (
     approve_action,
+    add_active_upload,
     attach_action_job,
     cancel_job,
+    clear_active_uploads,
     create_action,
     create_job,
+    get_upload,
     get_job,
     initialize,
+    list_active_uploads,
     list_jobs,
     list_pending_actions,
     list_uploads,
     reject_action,
+    set_active_uploads,
 )
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -120,7 +125,7 @@ def help_text() -> str:
         "/actions\n/approve <code>\n/reject <code>\n\n"
         "Telegram file inbox:\n"
         "Send a document directly to this private chat.\n"
-        "/uploads\n\n"
+        "/uploads\n/file\n/files\n/use_file <id>\n/add_file <id>\n/forget_file\n\n"
         "Hermes remains read-only. Only allowlisted action scripts run after explicit approval."
     )
 
@@ -264,6 +269,47 @@ def list_uploads_text() -> str:
     )
 
 
+def list_active_files_text(chat_id: int) -> str:
+    active = list_active_uploads(chat_id, 10)
+    if not active:
+        return "No active files for this chat.\n\nUse /use_file <id> or /add_file <id>."
+    lines = ["Active files (sent to Hermes automatically)\n"]
+    for row in active:
+        lines.append(
+            f"{row['position']}.  #{row['upload_id']} {row['original_name']} ({human_bytes(row['size_bytes'])})"
+        )
+    lines.append("\nUse /forget_file to clear.")
+    return "\n".join(lines)
+
+
+def set_active_file(chat_id: int, argument: str) -> str:
+    if not argument or not argument.lstrip("#").isdigit():
+        return "Usage: /use_file <id>"
+    upload_id = int(argument.lstrip("#"))
+    upload = get_upload(upload_id)
+    if not upload:
+        return "Upload not found. Use /uploads to list."
+    set_active_uploads(chat_id, [upload_id])
+    return f"Active file set to upload #{upload_id}: {upload['original_name']}"
+
+
+def add_active_file(chat_id: int, argument: str) -> str:
+    if not argument or not argument.lstrip("#").isdigit():
+        return "Usage: /add_file <id>"
+    upload_id = int(argument.lstrip("#"))
+    upload = get_upload(upload_id)
+    if not upload:
+        return "Upload not found. Use /uploads to list."
+    if not add_active_upload(chat_id, upload_id):
+        return f"Upload #{upload_id} is already active."
+    return f"Added active file upload #{upload_id}: {upload['original_name']}"
+
+
+def forget_active_files(chat_id: int) -> str:
+    clear_active_uploads(chat_id)
+    return "Cleared active file context for this chat."
+
+
 def handle_document(message: dict[str, Any], chat_id: int) -> None:
     document = message.get("document")
     if not isinstance(document, dict):
@@ -271,6 +317,7 @@ def handle_document(message: dict[str, Any], chat_id: int) -> None:
     try:
         saved = save_document(
             document,
+            chat_id=chat_id,
             telegram_request=telegram_request,
             bot_token=BOT_TOKEN,
         )
@@ -281,7 +328,8 @@ def handle_document(message: dict[str, Any], chat_id: int) -> None:
             f"Name: {saved['original_name']}\n"
             f"Size: {human_bytes(saved['size_bytes'])}\n"
             f"Type: {saved['mime_type']}\n\n"
-            "No processing was performed automatically.",
+            "This upload is now the active file for this chat.\n"
+            "Use /file to confirm or /add_file <id> to add more.",
         )
     except Exception as exc:
         send_message(chat_id, f"File upload failed: {exc}")
@@ -355,6 +403,14 @@ def handle_message(message: dict[str, Any]) -> None:
                 response = "Action rejected." if result.get("ok") else f"Reject failed: {result.get('reason', 'unknown')}"
         elif command == "/uploads":
             response = list_uploads_text()
+        elif command in {"/file", "/files"}:
+            response = list_active_files_text(chat_id)
+        elif command == "/use_file":
+            response = set_active_file(chat_id, argument)
+        elif command == "/add_file":
+            response = add_active_file(chat_id, argument)
+        elif command == "/forget_file":
+            response = forget_active_files(chat_id)
         else:
             response = "Unknown command.\n\nUse /help to see available commands."
     except BotError as exc:

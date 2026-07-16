@@ -64,7 +64,7 @@ class JobRunner:
 
         try:
             if kind == "hermes":
-                result = ask_hermes(str(job["payload"]))
+                result = ask_hermes(str(job["payload"]), chat_id=chat_id)
             elif kind == "action":
                 result = self._run_action(str(job["payload"]))
             else:

@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from upload_context import build_upload_context
+from upload_context import build_active_upload_context, build_upload_context
 
 
 REPO_ROOT = Path("/home/rushil/projects/imac-agent")
@@ -124,7 +124,7 @@ def build_server_snapshot() -> str:
     return "\n\n".join(sections)
 
 
-def ask_hermes(question: str) -> str:
+def ask_hermes(question: str, *, chat_id: int | None = None) -> str:
     clean_question = question.strip()
     if not clean_question:
         raise HermesBridgeError("Ask a question after /ask.")
@@ -136,6 +136,7 @@ def ask_hermes(question: str) -> str:
     hermes_bin = _resolve_hermes_bin()
     snapshot = build_server_snapshot()
     upload_context = build_upload_context(clean_question)
+    active_upload_context = build_active_upload_context(chat_id) if chat_id is not None else ""
 
     prompt = f"""You are Hermes answering Rushil through his private Telegram operations bot.
 
@@ -155,6 +156,9 @@ Rushil's question:
 
 Current read-only server snapshot:
 {snapshot}
+
+Active Telegram file context:
+{active_upload_context if active_upload_context else "No active Telegram file context for this chat."}
 
 Referenced Telegram upload content:
 {upload_context if upload_context else "No upload was referenced in this request."}

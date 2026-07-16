@@ -63,9 +63,19 @@ def initialize() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS active_uploads (
+                chat_id INTEGER NOT NULL,
+                upload_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, upload_id),
+                FOREIGN KEY(upload_id) REFERENCES uploads(id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_actions_code ON actions(code);
             CREATE INDEX IF NOT EXISTS idx_uploads_created_at ON uploads(created_at);
+            CREATE INDEX IF NOT EXISTS idx_active_uploads_chat ON active_uploads(chat_id);
             """
         )
 
@@ -426,5 +436,112 @@ def list_uploads(limit: int = 10) -> list[dict[str, Any]]:
             LIMIT ?
             """,
             (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_upload(upload_id: int) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM uploads WHERE id = ?",
+            (upload_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_active_uploads(chat_id: int, upload_ids: list[int]) -> None:
+    unique_ids: list[int] = []
+    seen: set[int] = set()
+    for upload_id in upload_ids:
+        value = int(upload_id)
+        if value <= 0:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        unique_ids.append(value)
+
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM active_uploads WHERE chat_id = ?",
+            (chat_id,),
+        )
+        for index, upload_id in enumerate(unique_ids, start=1):
+            connection.execute(
+                """
+                INSERT INTO active_uploads(chat_id, upload_id, position, added_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (chat_id, upload_id, index, _now()),
+            )
+
+
+def add_active_upload(chat_id: int, upload_id: int) -> bool:
+    upload_id = int(upload_id)
+    if upload_id <= 0:
+        return False
+
+    with _connect() as connection:
+        existing = connection.execute(
+            """
+            SELECT 1 FROM active_uploads
+            WHERE chat_id = ? AND upload_id = ?
+            """,
+            (chat_id, upload_id),
+        ).fetchone()
+        if existing:
+            return False
+
+        row = connection.execute(
+            """
+            SELECT COALESCE(MAX(position), 0) AS max_position
+            FROM active_uploads
+            WHERE chat_id = ?
+            """,
+            (chat_id,),
+        ).fetchone()
+        max_position = int(row["max_position"] or 0) if row else 0
+
+        connection.execute(
+            """
+            INSERT INTO active_uploads(chat_id, upload_id, position, added_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (chat_id, upload_id, max_position + 1, _now()),
+        )
+
+    return True
+
+
+def clear_active_uploads(chat_id: int) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM active_uploads WHERE chat_id = ?",
+            (chat_id,),
+        )
+
+
+def list_active_uploads(chat_id: int, limit: int = 10) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 50))
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                au.chat_id,
+                au.upload_id,
+                au.position,
+                au.added_at,
+                u.original_name,
+                u.stored_path,
+                u.mime_type,
+                u.size_bytes,
+                u.created_at
+            FROM active_uploads au
+            JOIN uploads u ON u.id = au.upload_id
+            WHERE au.chat_id = ?
+            ORDER BY au.position ASC
+            LIMIT ?
+            """,
+            (chat_id, limit),
         ).fetchall()
     return [dict(row) for row in rows]

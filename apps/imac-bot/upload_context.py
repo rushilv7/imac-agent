@@ -44,6 +44,36 @@ def _get_upload(upload_id: int) -> dict | None:
         connection.close()
 
 
+def _get_active_uploads(chat_id: int) -> list[dict]:
+    if not STATE_DB.is_file():
+        return []
+    connection = sqlite3.connect(STATE_DB)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                au.upload_id,
+                au.position,
+                u.file_unique_id,
+                u.original_name,
+                u.stored_path,
+                u.mime_type,
+                u.size_bytes,
+                u.created_at
+            FROM active_uploads au
+            JOIN uploads u ON u.id = au.upload_id
+            WHERE au.chat_id = ?
+            ORDER BY au.position ASC
+            LIMIT 10
+            """,
+            (chat_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
+
+
 def _validated_path(stored_path: str) -> Path:
     path = Path(stored_path).expanduser().resolve()
     try:
@@ -138,6 +168,69 @@ def _extract_upload(upload_id: int) -> str:
         )
 
     return header + "\nExtracted content:\n" + body
+
+
+def _extract_upload_row(upload: dict) -> str:
+    upload_id = int(upload["upload_id"])
+    path = _validated_path(str(upload["stored_path"]))
+    suffix = path.suffix.lower()
+    mime_type = str(upload.get("mime_type") or "unknown")
+
+    header = (
+        f"Upload ID: #{upload_id}\n"
+        f"Original name: {upload['original_name']}\n"
+        f"MIME type: {mime_type}\n"
+        f"Size bytes: {upload['size_bytes']}\n"
+    )
+
+    if suffix == ".csv" or mime_type in {"text/csv", "application/csv"}:
+        body = _read_csv(path)
+    elif suffix in {".txt", ".md", ".json", ".log", ".tsv", ".yaml", ".yml"} or mime_type.startswith("text/"):
+        body = _read_text(path)
+    elif suffix == ".pdf" or mime_type == "application/pdf":
+        try:
+            result = subprocess.run(
+                ["pdftotext", "-layout", str(path), "-"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except FileNotFoundError:
+            body = "PDF extraction is unavailable because pdftotext is not installed."
+        except subprocess.TimeoutExpired:
+            body = "PDF extraction timed out."
+        else:
+            if result.returncode != 0:
+                body = (
+                    "PDF extraction failed: "
+                    + (result.stderr.strip() or "unknown pdftotext error")
+                )
+            else:
+                extracted = result.stdout.strip()
+                body = extracted[:MAX_TEXT_CHARS] if extracted else "PDF contained no extractable text."
+    else:
+        body = (
+            "Binary file detected. This file type is not supported for "
+            "content extraction yet. Analyze the available metadata only."
+        )
+
+    return header + "\nExtracted content:\n" + body
+
+
+def build_active_upload_context(chat_id: int) -> str:
+    uploads = _get_active_uploads(chat_id)
+    if not uploads:
+        return ""
+
+    sections: list[str] = []
+    for upload in uploads:
+        try:
+            sections.append(_extract_upload_row(upload))
+        except UploadContextError as exc:
+            sections.append(f"Upload #{upload.get('upload_id')}: ERROR: {exc}")
+
+    return "\n\n===== ACTIVE TELEGRAM FILE CONTEXT =====\n\n" + "\n\n---\n\n".join(sections)
 
 
 def build_upload_context(question: str) -> str:
