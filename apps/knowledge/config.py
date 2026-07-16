@@ -14,4 +14,21 @@ ARTIFACTS_DIR = KNOWLEDGE_ROOT / "artifacts"
 ARCHIVE_DIR = KNOWLEDGE_ROOT / "archive"
 INDEX_DIR = KNOWLEDGE_ROOT / "index"
 TMP_DIR = KNOWLEDGE_ROOT / "tmp"
-WORKFLOWS_DIR
+WORKFLOWS_DIR = KNOWLEDGE_ROOT / "workflows"
+REGISTRY_DB = INDEX_DIR / "knowledge.db"
+
+
+def ensure_directories() -> None:
+    for path in (
+        INCOMING_DIR,
+        DOCUMENTS_DIR,
+        DATA_DIR,
+        IMAGES_DIR,
+        OTHER_DIR,
+        ARTIFACTS_DIR,
+        ARCHIVE_DIR,
+        INDEX_DIR,
+        TMP_DIR,
+        WORKFLOWS_DIR,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
