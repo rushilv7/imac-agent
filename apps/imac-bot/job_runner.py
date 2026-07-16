@@ -35,9 +35,19 @@ if str(KNOWLEDGE_DIR) not in sys.path:
 try:
     from organizer import allowed_destination_keys as knowledge_allowed_destinations  # type: ignore
     from organizer import organize as knowledge_organize  # type: ignore
+    from enrichment import enrich_item as knowledge_enrich_item  # type: ignore
+    from enrichment import enrich_pending as knowledge_enrich_pending  # type: ignore
+    from workflows import parse_operations as workflow_parse_operations  # type: ignore
+    from workflows import run_workflow as workflow_run  # type: ignore
+    from workflows import validate_operations as workflow_validate_operations  # type: ignore
 except Exception:
     knowledge_allowed_destinations = None
     knowledge_organize = None
+    knowledge_enrich_item = None
+    knowledge_enrich_pending = None
+    workflow_parse_operations = None
+    workflow_run = None
+    workflow_validate_operations = None
 
 
 class JobRunner:
@@ -116,6 +126,46 @@ class JobRunner:
             result = knowledge_organize(int(item_id_raw), destination_key)
             mark_action_finished(action_id, succeeded=True)
             return json.dumps(result, indent=2, sort_keys=True)[:8000]
+
+        if action_key.startswith("enrich:"):
+            if knowledge_enrich_item is None:
+                raise RuntimeError("Knowledge enrichment is unavailable.")
+            parts = action_key.split(":", 1)
+            if len(parts) != 2:
+                raise RuntimeError("Invalid enrich action key.")
+            item_id_raw = parts[1]
+            if not item_id_raw.isdigit():
+                raise RuntimeError("Invalid knowledge item id.")
+            result = knowledge_enrich_item(int(item_id_raw))
+            mark_action_finished(action_id, succeeded=True)
+            return json.dumps(result, indent=2, sort_keys=True)[:8000]
+
+        if action_key.startswith("enrich_pending:"):
+            if knowledge_enrich_pending is None:
+                raise RuntimeError("Knowledge enrichment is unavailable.")
+            parts = action_key.split(":", 1)
+            batch_raw = parts[1] if len(parts) == 2 else "10"
+            batch = int(batch_raw) if batch_raw.isdigit() else 10
+            batch = max(1, min(batch, 20))
+            result = knowledge_enrich_pending(batch)
+            mark_action_finished(action_id, succeeded=True)
+            return json.dumps(result, indent=2, sort_keys=True)[:8000]
+
+        if action_key.startswith("workflow:"):
+            if workflow_run is None or workflow_parse_operations is None or workflow_validate_operations is None:
+                raise RuntimeError("Workflow engine is unavailable.")
+            # workflow:<item_id>:<op1,op2,...>
+            parts = action_key.split(":", 2)
+            if len(parts) != 3:
+                raise RuntimeError("Invalid workflow action key.")
+            _, item_id_raw, ops_raw = parts
+            if not item_id_raw.isdigit():
+                raise RuntimeError("Invalid knowledge item id.")
+            ops = workflow_parse_operations(ops_raw)
+            workflow_validate_operations(ops)
+            report = workflow_run(knowledge_item_id=int(item_id_raw), operations=ops)
+            mark_action_finished(action_id, succeeded=True)
+            return json.dumps(report.__dict__, indent=2, sort_keys=True)[:8000]
 
         script = ACTION_SCRIPTS.get(action_key)
         if script is None:

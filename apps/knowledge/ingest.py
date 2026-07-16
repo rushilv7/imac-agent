@@ -325,6 +325,15 @@ def ingest(path: str | Path) -> dict[str, Any]:
     if extracted_text and "text_sample" not in metadata:
         metadata["text_sample"] = extracted_text
 
+    # Phase 2: store a bounded extracted_text for full-text search and enrichment.
+    extracted_for_index = ""
+    if extracted_text:
+        extracted_for_index = extracted_text
+    else:
+        sample = metadata.get("text_sample") or metadata.get("sample")
+        if isinstance(sample, str):
+            extracted_for_index = sample[:TEXT_LIMIT]
+
     item = register(
         stored_path=file_path,
         sha256=digest,
@@ -337,6 +346,7 @@ def ingest(path: str | Path) -> dict[str, Any]:
         summary=None,
         keywords=[],
         metadata=metadata,
+        extracted_text=extracted_for_index,
         suggested_path=None,
     )
 

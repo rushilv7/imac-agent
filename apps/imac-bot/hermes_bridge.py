@@ -155,6 +155,10 @@ Rules:
 - If the snapshot is insufficient, state the exact additional read-only check that would be useful.
 - Be concise, practical, and explicit about uncertainty.
 - Do not claim that you changed anything.
+- If you use information from any knowledge item context, include a final section:
+  Sources:
+  - Knowledge Item #<id> — <filename>
+  (One bullet per source used.)
 
 Rushil's question:
 {clean_question}

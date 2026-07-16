@@ -23,19 +23,29 @@ try:
     from registry import get as knowledge_get  # type: ignore
     from registry import list_newest as knowledge_list_newest  # type: ignore
     from registry import search as knowledge_search  # type: ignore
+    from registry import search_ranked as knowledge_search_ranked  # type: ignore
+    from enrichment import enrich_item as knowledge_enrich_item  # type: ignore
+    from enrichment import enrich_pending as knowledge_enrich_pending  # type: ignore
+    from enrichment import status as knowledge_enrichment_status  # type: ignore
     from scan import command_scan as knowledge_scan  # type: ignore
     from organizer import allowed_destination_keys, suggest_destination  # type: ignore
     from artifacts import get_artifact, list_artifacts  # type: ignore
+    from config import KNOWLEDGE_ROOT as KNOWLEDGE_ROOT_PATH  # type: ignore
 except Exception:
     knowledge_ingest = None
     knowledge_get = None
     knowledge_list_newest = None
     knowledge_search = None
+    knowledge_search_ranked = None
+    knowledge_enrich_item = None
+    knowledge_enrich_pending = None
+    knowledge_enrichment_status = None
     knowledge_scan = None
     allowed_destination_keys = None
     suggest_destination = None
     get_artifact = None
     list_artifacts = None
+    KNOWLEDGE_ROOT_PATH = None
 from state_store import (
     approve_action,
     add_active_upload,
@@ -115,6 +125,55 @@ def send_message(chat_id: int, text: str) -> None:
         telegram_request("sendMessage", {"chat_id": chat_id, "text": chunk})
 
 
+def send_document_file(chat_id: int, path: Path, *, caption: str | None = None) -> None:
+    # Telegram requires multipart form upload for sendDocument.
+    # Keep this minimal and avoid logging paths or file contents.
+    boundary = f"----imac-bot-{secrets.token_hex(8)}"
+    body_parts: list[bytes] = []
+
+    fields = {
+        "chat_id": str(int(chat_id)),
+    }
+    if caption:
+        fields["caption"] = caption[:900]
+
+    for key, value in fields.items():
+        body_parts.append(f"--{boundary}\r\n".encode("utf-8"))
+        body_parts.append(
+            f"Content-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode(
+                "utf-8"
+            )
+        )
+
+    filename = path.name
+    body_parts.append(f"--{boundary}\r\n".encode("utf-8"))
+    body_parts.append(
+        (
+            f"Content-Disposition: form-data; name=\"document\"; filename=\"{filename}\"\r\n"
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8")
+    )
+    body_parts.append(path.read_bytes())
+    body_parts.append(b"\r\n")
+    body_parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+
+    request = urllib.request.Request(
+        f"{TELEGRAM_API}/sendDocument",
+        data=b"".join(body_parts),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            data = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise BotError(f"Telegram returned HTTP {exc.code}") from None
+    except urllib.error.URLError as exc:
+        raise BotError(f"Telegram network error: {exc.reason}") from None
+    if not data.get("ok"):
+        raise BotError(data.get("description", "Telegram API request failed"))
+
+
 def human_bytes(value: int | float) -> str:
     size = float(value)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -152,8 +211,12 @@ def help_text() -> str:
         "Send a document directly to this private chat.\n"
         "/uploads\n/file\n/files\n/use_file <id>\n/add_file <id>\n/forget_file\n\n"
         "Hermes remains read-only. Only allowlisted action scripts run after explicit approval.\n\n"
-        "Knowledge Platform (Phase 1):\n"
-        "/scan\n/knowledge\n/find <query>\n/item <id>\n/organize\n/artifacts\n/artifact <id>"
+        "Knowledge Platform:\n"
+        "/scan\n/knowledge\n/find <query>\n/item <id>\n/send_item <id>\n"
+        "/enrich <id>\n/enrich_pending\n/enrichment_status\n"
+        "/organize\n/artifacts\n/artifact <id>\n/send_artifact <id>\n"
+        "/profile <knowledge-item-id>\n/prepare_clean <knowledge-item-id>\n"
+        "/workflow <knowledge-item-id> <operation1,operation2,...>"
     )
 
 
@@ -307,6 +370,176 @@ def list_active_files_text(chat_id: int) -> str:
         )
     lines.append("\nUse /forget_file to clear.")
     return "\n".join(lines)
+
+
+def _validated_path_under_knowledge_root(stored_path: str) -> Path:
+    if KNOWLEDGE_ROOT_PATH is None:
+        raise BotError("Knowledge platform is not available.")
+    path = Path(stored_path).expanduser().resolve()
+    root = Path(KNOWLEDGE_ROOT_PATH).expanduser().resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise BotError("Refused to access path outside the knowledge root.") from exc
+    if not path.is_file():
+        raise BotError("Requested file is missing.")
+    return path
+
+
+def command_send_item(chat_id: int, argument: str) -> str:
+    if knowledge_get is None:
+        return "Knowledge platform is not available."
+    if not argument or not argument.lstrip("#").isdigit():
+        return "Usage: /send_item <id>"
+    item = knowledge_get(int(argument.lstrip("#")))
+    if not item:
+        return "Item not found."
+    path = _validated_path_under_knowledge_root(str(item.get("stored_path") or ""))
+    send_document_file(
+        chat_id,
+        path,
+        caption=f"Knowledge item #{item['id']}: {item.get('original_name') or ''}",
+    )
+    return "Sent."
+
+
+def command_send_artifact(chat_id: int, argument: str) -> str:
+    if get_artifact is None:
+        return "Knowledge platform is not available."
+    if not argument or not argument.lstrip("#").isdigit():
+        return "Usage: /send_artifact <id>"
+    artifact = get_artifact(int(argument.lstrip("#")))
+    if not artifact:
+        return "Artifact not found."
+    path = _validated_path_under_knowledge_root(str(artifact.get("stored_path") or ""))
+    send_document_file(
+        chat_id,
+        path,
+        caption=f"Artifact #{artifact['id']}: {artifact.get('filename') or ''}",
+    )
+    return "Sent."
+
+
+def propose_enrich_item(chat_id: int, argument: str) -> str:
+    if not argument or not argument.lstrip("#").isdigit():
+        return "Usage: /enrich <id>"
+    item_id = int(argument.lstrip("#"))
+    code = secrets.token_hex(3).upper()
+    description = (
+        f"Enrich knowledge item #{item_id} (bounded summary/keywords/entities; no file changes)."
+    )
+    create_action(
+        code=code,
+        action_key=f"enrich:{item_id}",
+        description=description,
+        chat_id=chat_id,
+        ttl_minutes=10,
+    )
+    return (
+        "Action proposed. No change has been made.\n\n"
+        f"{description}\n"
+        f"Approval code: {code}\n"
+        "Expires in 10 minutes.\n\n"
+        f"Run /approve {code} to execute or /reject {code} to reject."
+    )
+
+
+def propose_enrich_pending(chat_id: int) -> str:
+    code = secrets.token_hex(3).upper()
+    description = "Enrich a small batch of pending knowledge items (max 10)."
+    create_action(
+        code=code,
+        action_key="enrich_pending:10",
+        description=description,
+        chat_id=chat_id,
+        ttl_minutes=10,
+    )
+    return (
+        "Action proposed. No change has been made.\n\n"
+        f"{description}\n"
+        f"Approval code: {code}\n"
+        "Expires in 10 minutes.\n\n"
+        f"Run /approve {code} to execute or /reject {code} to reject."
+    )
+
+
+def propose_workflow(chat_id: int, argument: str) -> str:
+    parts = argument.split(maxsplit=1)
+    if len(parts) != 2:
+        return "Usage: /workflow <knowledge-item-id> <operation1,operation2,...>"
+    item_raw, ops_raw = parts
+    if not item_raw.lstrip("#").isdigit():
+        return "Usage: /workflow <knowledge-item-id> <operation1,operation2,...>"
+    item_id = int(item_raw.lstrip("#"))
+
+    # Validate allowlist locally before proposing.
+    try:
+        from workflows import parse_operations, validate_operations  # type: ignore
+
+        ops = parse_operations(ops_raw)
+        validate_operations(ops)
+    except Exception as exc:
+        return f"Workflow proposal rejected: {exc}"
+
+    code = secrets.token_hex(3).upper()
+    description = (
+        f"Run workflow on knowledge item #{item_id} with operations: {', '.join(ops)}. "
+        "This will create a cleaned COPY under ~/knowledge/artifacts and register it."
+    )
+    create_action(
+        code=code,
+        action_key=f"workflow:{item_id}:{','.join(ops)}",
+        description=description,
+        chat_id=chat_id,
+        ttl_minutes=10,
+    )
+    return (
+        "Action proposed. No change has been made.\n\n"
+        f"{description}\n"
+        f"Approval code: {code}\n"
+        "Expires in 10 minutes.\n\n"
+        f"Run /approve {code} to execute or /reject {code} to reject."
+    )
+
+
+def command_profile_item(argument: str) -> str:
+    if knowledge_get is None:
+        return "Knowledge platform is not available."
+    if not argument or not argument.lstrip("#").isdigit():
+        return "Usage: /profile <knowledge-item-id>"
+    item = knowledge_get(int(argument.lstrip("#")))
+    if not item:
+        return "Item not found."
+    metadata = str(item.get("metadata_json") or "")
+    summary = str(item.get("summary") or "")
+    doc_type = str(item.get("document_type") or "")
+    suggested = str(item.get("suggested_category") or "")
+    return (
+        f"Knowledge Item #{item['id']}\n"
+        f"Name: {item.get('original_name') or ''}\n"
+        f"Type: {doc_type}\n"
+        f"Suggested category: {suggested}\n"
+        f"Summary: {summary[:700]}\n\n"
+        f"Metadata JSON (truncated):\n{metadata[:2500]}"
+    )
+
+
+def command_prepare_clean(argument: str) -> str:
+    if knowledge_get is None:
+        return "Knowledge platform is not available."
+    if not argument or not argument.lstrip("#").isdigit():
+        return "Usage: /prepare_clean <knowledge-item-id>"
+    item = knowledge_get(int(argument.lstrip("#")))
+    if not item:
+        return "Item not found."
+    ext = str(item.get("extension") or "").lower().lstrip(".")
+    if ext not in {"csv", "tsv", "xlsx", "xls", "xlsm"}:
+        return "Only CSV and Excel files are supported for cleaning workflows."
+    return (
+        "Suggested workflow operations:\n"
+        "trim_strings,standardize_column_names,normalize_booleans,normalize_dates,remove_exact_duplicates\n\n"
+        f"Run: /workflow {item['id']} trim_strings,standardize_column_names,remove_exact_duplicates"
+    )
 
 
 def set_active_file(chat_id: int, argument: str) -> str:
@@ -484,14 +717,46 @@ def handle_message(message: dict[str, Any]) -> None:
                 if not argument:
                     response = "Usage: /find <query>"
                 else:
-                    hits = knowledge_search(argument, 10)
+                    hits = (
+                        knowledge_search_ranked(argument, 10)
+                        if knowledge_search_ranked is not None
+                        else knowledge_search(argument, 10)
+                    )
                     if not hits:
                         response = "No matches."
                     else:
-                        response = "Matches\n\n" + "\n".join(
-                            f"#{item['id']} {item.get('category') or 'unknown'} {item.get('original_name') or ''}"
-                            for item in hits
-                        )
+                        lines: list[str] = []
+                        for index, item in enumerate(hits, start=1):
+                            excerpt = str(item.get("excerpt") or "").replace("\n", " ").strip()
+                            if excerpt:
+                                excerpt = excerpt[:160]
+                            rank = item.get("rank")
+                            rank_text = f"rank={float(rank):.3f}" if isinstance(rank, (int, float)) else ""
+                            lines.append(
+                                f"{index}.  #{item['id']} {item.get('category') or 'unknown'} {item.get('original_name') or ''}"
+                                + (f" ({rank_text})" if rank_text else "")
+                                + (f"\n    {excerpt}" if excerpt else "")
+                            )
+                        response = "Matches\n\n" + "\n".join(lines)
+        elif command == "/send_item":
+            response = command_send_item(chat_id, argument)
+        elif command == "/send_artifact":
+            response = command_send_artifact(chat_id, argument)
+        elif command == "/enrich":
+            response = propose_enrich_item(chat_id, argument)
+        elif command == "/enrich_pending":
+            response = propose_enrich_pending(chat_id)
+        elif command == "/enrichment_status":
+            if knowledge_enrichment_status is None:
+                response = "Knowledge platform is not available."
+            else:
+                response = json.dumps(knowledge_enrichment_status(), indent=2, sort_keys=True)[:3500]
+        elif command == "/workflow":
+            response = propose_workflow(chat_id, argument)
+        elif command == "/profile":
+            response = command_profile_item(argument)
+        elif command == "/prepare_clean":
+            response = command_prepare_clean(argument)
         elif command == "/item":
             if knowledge_get is None:
                 response = "Knowledge platform is not available."

@@ -13,11 +13,12 @@ fi
 
 INCOMING="$HOME/knowledge/incoming"
 TEST_DIR="$INCOMING/test-phase1"
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 
 mkdir -p "$TEST_DIR"
 
-TXT_PATH="$TEST_DIR/test_note.txt"
-CSV_PATH="$TEST_DIR/test_table.csv"
+TXT_PATH="$TEST_DIR/test_note_${STAMP}.txt"
+CSV_PATH="$TEST_DIR/test_table_${STAMP}.csv"
 
 cleanup() {
   rm -f "$TXT_PATH" "$CSV_PATH" 2>/dev/null || true
@@ -25,13 +26,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat > "$TXT_PATH" <<'EOF'
+cat > "$TXT_PATH" <<EOF
 Hello knowledge platform.
-This is a phase 1 test.
+This is a phase 1 test run: $STAMP.
 EOF
 
-cat > "$CSV_PATH" <<'EOF'
+cat > "$CSV_PATH" <<EOF
 name,age
+stamp,${STAMP}
 alice,30
 bob,
 alice,30

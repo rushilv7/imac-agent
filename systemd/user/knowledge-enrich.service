@@ -1,0 +1,8 @@
+[Unit]
+Description=Knowledge enrichment batch runner
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/rushil/projects/imac-agent
+ExecStart=/home/rushil/projects/imac-agent/apps/knowledge/.venv/bin/python /home/rushil/projects/imac-agent/enrich.py pending
+# Safety: no secrets, no network ports, bounded batch. Uses Hermes safe toolset.

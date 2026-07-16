@@ -11,6 +11,7 @@ from pathlib import Path
 
 STATE_DB = Path.home() / ".local" / "state" / "imac-bot" / "state.db"
 INBOX_DIR = (Path.home() / "knowledge" / "incoming" / "telegram").resolve()
+KNOWLEDGE_ROOT = (Path.home() / "knowledge").resolve()
 MAX_TEXT_CHARS = 30000
 MAX_CSV_ROWS = 200
 
@@ -21,15 +22,23 @@ NATURAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Allow importing the Phase 1 knowledge registry without packaging.
+# Phase 2: multi-document retrieval caps.
+MAX_AUTO_KNOWLEDGE_ITEMS = 5
+MAX_AUTO_CONTEXT_CHARS = 60000
+
+# Allow importing the knowledge registry without packaging.
 KNOWLEDGE_DIR = Path("/home/rushil/projects/imac-agent/apps/knowledge")
 if str(KNOWLEDGE_DIR) not in sys.path:
     sys.path.insert(0, str(KNOWLEDGE_DIR))
 
 try:
     from registry import get as knowledge_get  # type: ignore
+    from registry import list_newest as knowledge_list_newest  # type: ignore
+    from registry import search_ranked as knowledge_search_ranked  # type: ignore
 except Exception:
     knowledge_get = None
+    knowledge_list_newest = None
+    knowledge_search_ranked = None
 
 
 class UploadContextError(RuntimeError):
@@ -115,13 +124,12 @@ def _validated_path(stored_path: str) -> Path:
 
 
 def _validated_knowledge_path(stored_path: str) -> Path:
-    # Knowledge items must still live under incoming.
+    # Knowledge items must live under the allowlisted knowledge root.
     path = Path(stored_path).expanduser().resolve()
-    incoming_root = (Path.home() / "knowledge" / "incoming").resolve()
     try:
-        path.relative_to(incoming_root)
+        path.relative_to(KNOWLEDGE_ROOT)
     except ValueError as exc:
-        raise UploadContextError("Stored knowledge path is outside ~/knowledge/incoming") from exc
+        raise UploadContextError("Stored knowledge path is outside the knowledge root") from exc
     if not path.is_file():
         raise UploadContextError("Stored knowledge file is missing.")
     return path
@@ -154,7 +162,13 @@ def _read_csv(path: Path) -> str:
     )
 
 
-def _extract_path(path: Path, *, label: str, mime_type: str | None = None, size_bytes: int | None = None) -> str:
+def _extract_path(
+    path: Path,
+    *,
+    label: str,
+    mime_type: str | None = None,
+    size_bytes: int | None = None,
+) -> str:
     suffix = path.suffix.lower()
     mime = (mime_type or "unknown").strip()
 
@@ -181,10 +195,16 @@ def _extract_path(path: Path, *, label: str, mime_type: str | None = None, size_
             body = "PDF extraction timed out."
         else:
             if result.returncode != 0:
-                body = "PDF extraction failed: " + (result.stderr.strip() or "unknown pdftotext error")
+                body = "PDF extraction failed: " + (
+                    result.stderr.strip() or "unknown pdftotext error"
+                )
             else:
                 extracted = result.stdout.strip()
-                body = extracted[:MAX_TEXT_CHARS] if extracted else "PDF contained no extractable text."
+                body = (
+                    extracted[:MAX_TEXT_CHARS]
+                    if extracted
+                    else "PDF contained no extractable text."
+                )
     else:
         body = (
             "Binary file detected. This file type is not supported for "
@@ -248,7 +268,9 @@ def build_active_upload_context(chat_id: int) -> str:
         except UploadContextError as exc:
             sections.append(f"Upload #{upload.get('upload_id')}: ERROR: {exc}")
 
-    return "\n\n===== ACTIVE TELEGRAM FILE CONTEXT =====\n\n" + "\n\n---\n\n".join(sections)
+    return "\n\n===== ACTIVE TELEGRAM FILE CONTEXT =====\n\n" + "\n\n---\n\n".join(
+        sections
+    )
 
 
 def build_upload_context(question: str) -> str:
@@ -266,29 +288,82 @@ def build_upload_context(question: str) -> str:
     return "\n\n===== REFERENCED TELEGRAM UPLOADS =====\n\n" + "\n\n---\n\n".join(sections)
 
 
+def _auto_select_knowledge_items(question: str) -> list[int]:
+    if knowledge_search_ranked is None:
+        return []
+
+    # Only auto-select if the user didn't explicitly reference items.
+    if referenced_knowledge_item_ids(question):
+        return []
+
+    raw = (question or "").strip()
+    if not raw:
+        return []
+
+    # Convert free-form question text into an FTS-friendly query.
+    tokens = re.findall(r"[A-Za-z0-9]{3,}", raw)
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for token in tokens:
+        t = token.lower()
+        if t in seen:
+            continue
+        seen.add(t)
+        cleaned.append(token)
+        if len(cleaned) >= 8:
+            break
+    term = " OR ".join(cleaned)
+    if not term:
+        return []
+
+    try:
+        hits = knowledge_search_ranked(term, MAX_AUTO_KNOWLEDGE_ITEMS)
+    except Exception:
+        return []
+
+    ids: list[int] = []
+    for hit in hits:
+        try:
+            ids.append(int(hit["id"]))
+        except Exception:
+            continue
+    return ids[:MAX_AUTO_KNOWLEDGE_ITEMS]
+
+
 def build_knowledge_context(question: str, *, chat_id: int | None = None) -> str:
     item_ids = referenced_knowledge_item_ids(question)
 
     # Natural references like "this file" use the newest ingested knowledge item.
     if not item_ids and chat_id is not None and NATURAL_PATTERN.search(question):
-        if knowledge_get is not None:
+        if knowledge_list_newest is not None:
             try:
-                from registry import list_newest as knowledge_list_newest  # type: ignore
-
                 newest = knowledge_list_newest(1)
                 if newest:
                     item_ids = [int(newest[0]["id"])]
             except Exception:
                 item_ids = []
 
+    if not item_ids and chat_id is not None:
+        item_ids = _auto_select_knowledge_items(question)
+
     if not item_ids:
         return ""
 
     sections: list[str] = []
-    for item_id in item_ids:
+    total_chars = 0
+    for item_id in item_ids[:MAX_AUTO_KNOWLEDGE_ITEMS]:
         try:
-            sections.append(_extract_knowledge_item(item_id))
+            extracted = _extract_knowledge_item(item_id)
         except UploadContextError as exc:
-            sections.append(f"Knowledge item #{item_id}: ERROR: {exc}")
+            extracted = f"Knowledge item #{item_id}: ERROR: {exc}"
+
+        if total_chars + len(extracted) > MAX_AUTO_CONTEXT_CHARS:
+            break
+
+        sections.append(extracted)
+        total_chars += len(extracted)
+
+    if not sections:
+        return ""
 
     return "\n\n===== KNOWLEDGE ITEM CONTEXT =====\n\n" + "\n\n---\n\n".join(sections)
