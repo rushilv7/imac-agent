@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from state_store import record_upload, set_active_uploads
 
-INBOX_DIR = Path.home() / "inbox" / "telegram"
+INBOX_DIR = Path.home() / "knowledge" / "incoming" / "telegram"
 MAX_FILE_BYTES = 20 * 1024 * 1024
 
 

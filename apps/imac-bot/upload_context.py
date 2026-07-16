@@ -2,16 +2,34 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 STATE_DB = Path.home() / ".local" / "state" / "imac-bot" / "state.db"
-INBOX_DIR = (Path.home() / "inbox" / "telegram").resolve()
+INBOX_DIR = (Path.home() / "knowledge" / "incoming" / "telegram").resolve()
 MAX_TEXT_CHARS = 30000
 MAX_CSV_ROWS = 200
+
 UPLOAD_PATTERN = re.compile(r"\bupload\s*#?(\d+)\b", re.IGNORECASE)
+KNOWLEDGE_PATTERN = re.compile(r"\b(?:knowledge\s+item|item)\s*#?(\d+)\b", re.IGNORECASE)
+NATURAL_PATTERN = re.compile(
+    r"\b(this\s+(?:file|document|spreadsheet))\b",
+    re.IGNORECASE,
+)
+
+# Allow importing the Phase 1 knowledge registry without packaging.
+KNOWLEDGE_DIR = Path("/home/rushil/projects/imac-agent/apps/knowledge")
+if str(KNOWLEDGE_DIR) not in sys.path:
+    sys.path.insert(0, str(KNOWLEDGE_DIR))
+
+try:
+    from registry import get as knowledge_get  # type: ignore
+except Exception:
+    knowledge_get = None
 
 
 class UploadContextError(RuntimeError):
@@ -26,6 +44,17 @@ def referenced_upload_ids(question: str) -> list[int]:
         if upload_id not in seen:
             seen.add(upload_id)
             result.append(upload_id)
+    return result[:3]
+
+
+def referenced_knowledge_item_ids(question: str) -> list[int]:
+    seen: set[int] = set()
+    result: list[int] = []
+    for match in KNOWLEDGE_PATTERN.finditer(question):
+        item_id = int(match.group(1))
+        if item_id not in seen:
+            seen.add(item_id)
+            result.append(item_id)
     return result[:3]
 
 
@@ -85,6 +114,19 @@ def _validated_path(stored_path: str) -> Path:
     return path
 
 
+def _validated_knowledge_path(stored_path: str) -> Path:
+    # Knowledge items must still live under incoming.
+    path = Path(stored_path).expanduser().resolve()
+    incoming_root = (Path.home() / "knowledge" / "incoming").resolve()
+    try:
+        path.relative_to(incoming_root)
+    except ValueError as exc:
+        raise UploadContextError("Stored knowledge path is outside ~/knowledge/incoming") from exc
+    if not path.is_file():
+        raise UploadContextError("Stored knowledge file is missing.")
+    return path
+
+
 def _read_text(path: Path) -> str:
     data = path.read_bytes()[: MAX_TEXT_CHARS * 4]
     return data.decode("utf-8", errors="replace")[:MAX_TEXT_CHARS]
@@ -108,86 +150,23 @@ def _read_csv(path: Path) -> str:
     sample = output.getvalue()[:MAX_TEXT_CHARS]
     return (
         f"CSV sample containing up to {MAX_CSV_ROWS} rows. "
-        "The file may contain additional rows not included here.\n\n"
-        + sample
+        "The file may contain additional rows not included here.\n\n" + sample
     )
 
 
-def _extract_upload(upload_id: int) -> str:
-    upload = _get_upload(upload_id)
-    if upload is None:
-        raise UploadContextError(f"Upload #{upload_id} was not found.")
-
-    path = _validated_path(str(upload["stored_path"]))
+def _extract_path(path: Path, *, label: str, mime_type: str | None = None, size_bytes: int | None = None) -> str:
     suffix = path.suffix.lower()
-    mime_type = str(upload.get("mime_type") or "unknown")
+    mime = (mime_type or "unknown").strip()
 
-    header = (
-        f"Upload ID: #{upload_id}\n"
-        f"Original name: {upload['original_name']}\n"
-        f"MIME type: {mime_type}\n"
-        f"Size bytes: {upload['size_bytes']}\n"
-    )
+    header = f"{label}: {path.name}\nMIME type: {mime}\n"
+    if size_bytes is not None:
+        header += f"Size bytes: {size_bytes}\n"
 
-    if suffix == ".csv" or mime_type in {"text/csv", "application/csv"}:
+    if suffix == ".csv" or mime in {"text/csv", "application/csv"}:
         body = _read_csv(path)
-    elif suffix in {".txt", ".md", ".json", ".log", ".tsv", ".yaml", ".yml"} or mime_type.startswith("text/"):
+    elif suffix in {".txt", ".md", ".json", ".log", ".tsv", ".yaml", ".yml"} or mime.startswith("text/"):
         body = _read_text(path)
-    elif suffix == ".pdf" or mime_type == "application/pdf":
-        try:
-            result = subprocess.run(
-                ["pdftotext", "-layout", str(path), "-"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-        except FileNotFoundError:
-            body = (
-                "PDF extraction is unavailable because pdftotext is not installed."
-            )
-        except subprocess.TimeoutExpired:
-            body = "PDF extraction timed out."
-        else:
-            if result.returncode != 0:
-                body = (
-                    "PDF extraction failed: "
-                    + (result.stderr.strip() or "unknown pdftotext error")
-                )
-            else:
-                extracted = result.stdout.strip()
-                body = (
-                    extracted[:MAX_TEXT_CHARS]
-                    if extracted
-                    else "PDF contained no extractable text."
-                )
-    else:
-        body = (
-            "Binary file detected. This file type is not supported for "
-            "content extraction yet. Analyze the available metadata only."
-        )
-
-    return header + "\nExtracted content:\n" + body
-
-
-def _extract_upload_row(upload: dict) -> str:
-    upload_id = int(upload["upload_id"])
-    path = _validated_path(str(upload["stored_path"]))
-    suffix = path.suffix.lower()
-    mime_type = str(upload.get("mime_type") or "unknown")
-
-    header = (
-        f"Upload ID: #{upload_id}\n"
-        f"Original name: {upload['original_name']}\n"
-        f"MIME type: {mime_type}\n"
-        f"Size bytes: {upload['size_bytes']}\n"
-    )
-
-    if suffix == ".csv" or mime_type in {"text/csv", "application/csv"}:
-        body = _read_csv(path)
-    elif suffix in {".txt", ".md", ".json", ".log", ".tsv", ".yaml", ".yml"} or mime_type.startswith("text/"):
-        body = _read_text(path)
-    elif suffix == ".pdf" or mime_type == "application/pdf":
+    elif suffix == ".pdf" or mime == "application/pdf":
         try:
             result = subprocess.run(
                 ["pdftotext", "-layout", str(path), "-"],
@@ -202,10 +181,7 @@ def _extract_upload_row(upload: dict) -> str:
             body = "PDF extraction timed out."
         else:
             if result.returncode != 0:
-                body = (
-                    "PDF extraction failed: "
-                    + (result.stderr.strip() or "unknown pdftotext error")
-                )
+                body = "PDF extraction failed: " + (result.stderr.strip() or "unknown pdftotext error")
             else:
                 extracted = result.stdout.strip()
                 body = extracted[:MAX_TEXT_CHARS] if extracted else "PDF contained no extractable text."
@@ -216,6 +192,48 @@ def _extract_upload_row(upload: dict) -> str:
         )
 
     return header + "\nExtracted content:\n" + body
+
+
+def _extract_upload(upload_id: int) -> str:
+    upload = _get_upload(upload_id)
+    if upload is None:
+        raise UploadContextError(f"Upload #{upload_id} was not found.")
+
+    path = _validated_path(str(upload["stored_path"]))
+    return _extract_path(
+        path,
+        label=f"Upload ID: #{upload_id} (Telegram upload)",
+        mime_type=str(upload.get("mime_type") or "unknown"),
+        size_bytes=int(upload.get("size_bytes") or 0),
+    )
+
+
+def _extract_upload_row(upload: dict) -> str:
+    upload_id = int(upload["upload_id"])
+    path = _validated_path(str(upload["stored_path"]))
+    return _extract_path(
+        path,
+        label=f"Upload ID: #{upload_id} (Active file)",
+        mime_type=str(upload.get("mime_type") or "unknown"),
+        size_bytes=int(upload.get("size_bytes") or 0),
+    )
+
+
+def _extract_knowledge_item(item_id: int) -> str:
+    if knowledge_get is None:
+        raise UploadContextError("Knowledge platform is unavailable.")
+
+    item = knowledge_get(int(item_id))
+    if not item:
+        raise UploadContextError(f"Knowledge item #{item_id} was not found.")
+
+    path = _validated_knowledge_path(str(item.get("stored_path") or ""))
+    return _extract_path(
+        path,
+        label=f"Knowledge Item ID: #{item_id}",
+        mime_type=str(item.get("mime_type") or "unknown"),
+        size_bytes=int(item.get("size_bytes") or 0),
+    )
 
 
 def build_active_upload_context(chat_id: int) -> str:
@@ -246,3 +264,31 @@ def build_upload_context(question: str) -> str:
             sections.append(f"Upload #{upload_id}: ERROR: {exc}")
 
     return "\n\n===== REFERENCED TELEGRAM UPLOADS =====\n\n" + "\n\n---\n\n".join(sections)
+
+
+def build_knowledge_context(question: str, *, chat_id: int | None = None) -> str:
+    item_ids = referenced_knowledge_item_ids(question)
+
+    # Natural references like "this file" use the newest ingested knowledge item.
+    if not item_ids and chat_id is not None and NATURAL_PATTERN.search(question):
+        if knowledge_get is not None:
+            try:
+                from registry import list_newest as knowledge_list_newest  # type: ignore
+
+                newest = knowledge_list_newest(1)
+                if newest:
+                    item_ids = [int(newest[0]["id"])]
+            except Exception:
+                item_ids = []
+
+    if not item_ids:
+        return ""
+
+    sections: list[str] = []
+    for item_id in item_ids:
+        try:
+            sections.append(_extract_knowledge_item(item_id))
+        except UploadContextError as exc:
+            sections.append(f"Knowledge item #{item_id}: ERROR: {exc}")
+
+    return "\n\n===== KNOWLEDGE ITEM CONTEXT =====\n\n" + "\n\n---\n\n".join(sections)

@@ -9,7 +9,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from upload_context import build_active_upload_context, build_upload_context
+from upload_context import (
+    build_active_upload_context,
+    build_knowledge_context,
+    build_upload_context,
+)
 
 
 REPO_ROOT = Path("/home/rushil/projects/imac-agent")
@@ -111,14 +115,12 @@ def build_server_snapshot() -> str:
     for title, path in endpoints:
         data = _ops_get(path)
         sections.append(
-            f"===== {title} =====\n"
-            + json.dumps(data, indent=2, sort_keys=True)
+            f"===== {title} =====\n" + json.dumps(data, indent=2, sort_keys=True)
         )
 
     for script in READ_ONLY_SCRIPTS:
         sections.append(
-            f"===== APPROVED SCRIPT: {script.name} =====\n"
-            + _run_read_only_script(script)
+            f"===== APPROVED SCRIPT: {script.name} =====\n" + _run_read_only_script(script)
         )
 
     return "\n\n".join(sections)
@@ -136,7 +138,10 @@ def ask_hermes(question: str, *, chat_id: int | None = None) -> str:
     hermes_bin = _resolve_hermes_bin()
     snapshot = build_server_snapshot()
     upload_context = build_upload_context(clean_question)
-    active_upload_context = build_active_upload_context(chat_id) if chat_id is not None else ""
+    knowledge_context = build_knowledge_context(clean_question, chat_id=chat_id)
+    active_upload_context = (
+        build_active_upload_context(chat_id) if chat_id is not None else ""
+    )
 
     prompt = f"""You are Hermes answering Rushil through his private Telegram operations bot.
 
@@ -159,6 +164,9 @@ Current read-only server snapshot:
 
 Active Telegram file context:
 {active_upload_context if active_upload_context else "No active Telegram file context for this chat."}
+
+Knowledge item context:
+{knowledge_context if knowledge_context else "No knowledge item was referenced in this request."}
 
 Referenced Telegram upload content:
 {upload_context if upload_context else "No upload was referenced in this request."}
@@ -192,15 +200,12 @@ Referenced Telegram upload content:
             f"Hermes timed out after {HERMES_TIMEOUT_SECONDS} seconds."
         ) from exc
     except OSError as exc:
-        raise HermesBridgeError(
-            f"Could not start Hermes: {type(exc).__name__}"
-        ) from exc
+        raise HermesBridgeError(f"Could not start Hermes: {type(exc).__name__}") from exc
 
     if result.returncode != 0:
         local_error = result.stderr.strip() or result.stdout.strip()
         raise HermesBridgeError(
-            f"Hermes exited with code {result.returncode}. "
-            f"{local_error[:800]}"
+            f"Hermes exited with code {result.returncode}. {local_error[:800]}"
         )
 
     lines = result.stdout.strip().splitlines()
@@ -214,9 +219,6 @@ Referenced Telegram upload content:
         raise HermesBridgeError("Hermes returned an empty response.")
 
     if len(response) > MAX_RESPONSE_CHARS:
-        response = (
-            response[:MAX_RESPONSE_CHARS]
-            + "\n\n[Response truncated by the Telegram bridge.]"
-        )
+        response = response[:MAX_RESPONSE_CHARS] + "\n\n[Response truncated by the Telegram bridge.]"
 
     return response

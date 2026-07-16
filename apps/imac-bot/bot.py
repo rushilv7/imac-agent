@@ -11,6 +11,31 @@ from typing import Any
 
 from file_inbox import save_document
 from job_runner import JobRunner
+from pathlib import Path
+
+# Allow importing the Phase 1 knowledge modules without packaging.
+KNOWLEDGE_DIR = Path("/home/rushil/projects/imac-agent/apps/knowledge")
+if str(KNOWLEDGE_DIR) not in sys.path:
+    sys.path.insert(0, str(KNOWLEDGE_DIR))
+
+try:
+    from ingest import ingest as knowledge_ingest  # type: ignore
+    from registry import get as knowledge_get  # type: ignore
+    from registry import list_newest as knowledge_list_newest  # type: ignore
+    from registry import search as knowledge_search  # type: ignore
+    from scan import command_scan as knowledge_scan  # type: ignore
+    from organizer import allowed_destination_keys, suggest_destination  # type: ignore
+    from artifacts import get_artifact, list_artifacts  # type: ignore
+except Exception:
+    knowledge_ingest = None
+    knowledge_get = None
+    knowledge_list_newest = None
+    knowledge_search = None
+    knowledge_scan = None
+    allowed_destination_keys = None
+    suggest_destination = None
+    get_artifact = None
+    list_artifacts = None
 from state_store import (
     approve_action,
     add_active_upload,
@@ -126,7 +151,9 @@ def help_text() -> str:
         "Telegram file inbox:\n"
         "Send a document directly to this private chat.\n"
         "/uploads\n/file\n/files\n/use_file <id>\n/add_file <id>\n/forget_file\n\n"
-        "Hermes remains read-only. Only allowlisted action scripts run after explicit approval."
+        "Hermes remains read-only. Only allowlisted action scripts run after explicit approval.\n\n"
+        "Knowledge Platform (Phase 1):\n"
+        "/scan\n/knowledge\n/find <query>\n/item <id>\n/organize\n/artifacts\n/artifact <id>"
     )
 
 
@@ -321,6 +348,20 @@ def handle_document(message: dict[str, Any], chat_id: int) -> None:
             telegram_request=telegram_request,
             bot_token=BOT_TOKEN,
         )
+
+        ingest_note = ""
+        if knowledge_ingest is not None:
+            try:
+                ingest_result = knowledge_ingest(saved["stored_path"])
+                ingest_note = (
+                    f"Knowledge Item ID: #{ingest_result.get('knowledge_item_id')}\n"
+                    f"Duplicate: {'yes' if ingest_result.get('duplicate') else 'no'}\n"
+                    f"Category: {ingest_result.get('category')}\n"
+                    f"SHA256: {str(ingest_result.get('sha256') or '')[:12]}"
+                )
+            except Exception as exc:
+                ingest_note = f"Knowledge ingest failed: {type(exc).__name__}: {exc}"
+
         send_message(
             chat_id,
             "File saved to the private Telegram inbox.\n\n"
@@ -328,8 +369,9 @@ def handle_document(message: dict[str, Any], chat_id: int) -> None:
             f"Name: {saved['original_name']}\n"
             f"Size: {human_bytes(saved['size_bytes'])}\n"
             f"Type: {saved['mime_type']}\n\n"
-            "This upload is now the active file for this chat.\n"
-            "Use /file to confirm or /add_file <id> to add more.",
+            + (ingest_note + "\n\n" if ingest_note else "")
+            + "This upload is now the active file for this chat.\n"
+            + "Use /file to confirm or /add_file <id> to add more.",
         )
     except Exception as exc:
         send_message(chat_id, f"File upload failed: {exc}")
@@ -411,6 +453,125 @@ def handle_message(message: dict[str, Any]) -> None:
             response = add_active_file(chat_id, argument)
         elif command == "/forget_file":
             response = forget_active_files(chat_id)
+        elif command == "/scan":
+            if knowledge_scan is None:
+                response = "Knowledge platform is not available. Run scripts/bootstrap-knowledge-phase1.sh"
+            else:
+                result = knowledge_scan()
+                response = (
+                    "Knowledge scan complete.\n"
+                    f"Scanned: {result.get('scanned')}\n"
+                    f"New: {result.get('new')}\n"
+                    f"Duplicates: {result.get('duplicates')}\n"
+                    f"Failures: {result.get('failures')}"
+                )
+        elif command == "/knowledge":
+            if knowledge_list_newest is None:
+                response = "Knowledge platform is not available."
+            else:
+                items = knowledge_list_newest(10)
+                if not items:
+                    response = "No knowledge items yet."
+                else:
+                    response = "Newest knowledge items\n\n" + "\n".join(
+                        f"#{item['id']} {item.get('category') or 'unknown'} {item.get('original_name') or ''}"
+                        for item in items
+                    )
+        elif command == "/find":
+            if knowledge_search is None:
+                response = "Knowledge platform is not available."
+            else:
+                if not argument:
+                    response = "Usage: /find <query>"
+                else:
+                    hits = knowledge_search(argument, 10)
+                    if not hits:
+                        response = "No matches."
+                    else:
+                        response = "Matches\n\n" + "\n".join(
+                            f"#{item['id']} {item.get('category') or 'unknown'} {item.get('original_name') or ''}"
+                            for item in hits
+                        )
+        elif command == "/item":
+            if knowledge_get is None:
+                response = "Knowledge platform is not available."
+            else:
+                if not argument or not argument.lstrip("#").isdigit():
+                    response = "Usage: /item <id>"
+                else:
+                    item = knowledge_get(int(argument.lstrip("#")))
+                    if not item:
+                        response = "Item not found."
+                    else:
+                        response = (
+                            f"Knowledge Item #{item['id']}\n"
+                            f"Name: {item.get('original_name') or ''}\n"
+                            f"Category: {item.get('category') or ''}\n"
+                            f"Status: {item.get('status') or ''}\n"
+                            f"Path: {item.get('stored_path') or ''}\n"
+                            f"SHA256: {str(item.get('sha256') or '')[:16]}\n"
+                            f"Suggested: {item.get('suggested_path') or ''}"
+                        )
+        elif command == "/organize":
+            # Phase 1: propose organization for the most recent ingested item.
+            if knowledge_list_newest is None or suggest_destination is None or allowed_destination_keys is None:
+                response = "Knowledge platform is not available."
+            else:
+                items = knowledge_list_newest(1)
+                if not items:
+                    response = "No knowledge items to organize."
+                else:
+                    item = items[0]
+                    dest_key = suggest_destination(item)
+                    if dest_key not in set(allowed_destination_keys()):
+                        response = "No allowlisted destination for this item."
+                    else:
+                        code = secrets.token_hex(3).upper()
+                        description = f"Organize knowledge item #{item['id']} to {dest_key} (copy only; never overwrite)."
+                        create_action(
+                            code=code,
+                            action_key=f"organize:{int(item['id'])}:{dest_key}",
+                            description=description,
+                            chat_id=chat_id,
+                            ttl_minutes=10,
+                        )
+                        response = (
+                            "Action proposed. No change has been made.\n\n"
+                            f"{description}\n"
+                            f"Approval code: {code}\n"
+                            "Expires in 10 minutes.\n\n"
+                            f"Run /approve {code} to execute or /reject {code} to reject."
+                        )
+        elif command == "/artifacts":
+            if list_artifacts is None:
+                response = "Knowledge platform is not available."
+            else:
+                artifacts = list_artifacts(10)
+                if not artifacts:
+                    response = "No artifacts yet."
+                else:
+                    response = "Artifacts\n\n" + "\n".join(
+                        f"#{a['id']} {a.get('filename') or ''}"
+                        for a in artifacts
+                    )
+        elif command == "/artifact":
+            if get_artifact is None:
+                response = "Knowledge platform is not available."
+            else:
+                if not argument or not argument.lstrip("#").isdigit():
+                    response = "Usage: /artifact <id>"
+                else:
+                    artifact = get_artifact(int(argument.lstrip("#")))
+                    if not artifact:
+                        response = "Artifact not found."
+                    else:
+                        response = (
+                            f"Artifact #{artifact['id']}\n"
+                            f"Filename: {artifact.get('filename') or ''}\n"
+                            f"Path: {artifact.get('stored_path') or ''}\n"
+                            f"MIME: {artifact.get('mime_type') or ''}\n"
+                            f"Description: {artifact.get('description') or ''}"
+                        )
         else:
             response = "Unknown command.\n\nUse /help to see available commands."
     except BotError as exc:

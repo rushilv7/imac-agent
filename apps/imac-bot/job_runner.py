@@ -22,7 +22,22 @@ POLL_SECONDS = 1.0
 ACTION_SCRIPTS = {
     "restart:imac-demo": REPO_ROOT / "scripts" / "imac-demo-restart.sh",
     "restart:imac-ops": REPO_ROOT / "scripts" / "imac-ops-restart.sh",
+    "restart:imac-bot": REPO_ROOT / "scripts" / "imac-bot-restart.sh",
 }
+
+# Allow importing the Phase 1 knowledge modules without packaging.
+import sys
+
+KNOWLEDGE_DIR = REPO_ROOT / "apps" / "knowledge"
+if str(KNOWLEDGE_DIR) not in sys.path:
+    sys.path.insert(0, str(KNOWLEDGE_DIR))
+
+try:
+    from organizer import allowed_destination_keys as knowledge_allowed_destinations  # type: ignore
+    from organizer import organize as knowledge_organize  # type: ignore
+except Exception:
+    knowledge_allowed_destinations = None
+    knowledge_organize = None
 
 
 class JobRunner:
@@ -85,6 +100,23 @@ class JobRunner:
         data = json.loads(payload)
         action_key = str(data["action_key"])
         action_id = int(data["action_id"])
+
+        if action_key.startswith("organize:"):
+            if knowledge_organize is None or knowledge_allowed_destinations is None:
+                raise RuntimeError("Knowledge organizer is unavailable.")
+            parts = action_key.split(":", 2)
+            if len(parts) != 3:
+                raise RuntimeError("Invalid organize action key.")
+            _, item_id_raw, destination_key = parts
+            if not item_id_raw.isdigit():
+                raise RuntimeError("Invalid knowledge item id.")
+            if destination_key not in set(knowledge_allowed_destinations()):
+                raise RuntimeError("Destination key is not allowlisted.")
+
+            result = knowledge_organize(int(item_id_raw), destination_key)
+            mark_action_finished(action_id, succeeded=True)
+            return json.dumps(result, indent=2, sort_keys=True)[:8000]
+
         script = ACTION_SCRIPTS.get(action_key)
         if script is None:
             raise RuntimeError("Action is not allowlisted.")
