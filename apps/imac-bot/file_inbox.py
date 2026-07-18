@@ -72,6 +72,7 @@ def save_document(
         stored_path=str(destination),
         mime_type=document.get("mime_type"),
         size_bytes=destination.stat().st_size,
+        chat_id=chat_id,
     )
 
     if set_as_active and chat_id is not None:

@@ -104,6 +104,56 @@ def _read_csv_all_rows(path: Path) -> tuple[list[str], list[list[str]]]:
     return header, body
 
 
+def _read_xlsx_all_rows(path: Path) -> tuple[list[str], list[list[str]]]:
+    try:
+        import openpyxl  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise WorkflowError(f"openpyxl is required for Excel workflows: {type(exc).__name__}") from exc
+
+    try:
+        workbook = openpyxl.load_workbook(filename=str(path), read_only=True, data_only=True)
+    except Exception as exc:
+        raise WorkflowError(f"Workbook load failed: {type(exc).__name__}") from exc
+
+    if not workbook.sheetnames:
+        return [], []
+    sheet = workbook[workbook.sheetnames[0]]
+
+    rows: list[list[str]] = []
+    for r_idx, row in enumerate(sheet.iter_rows(values_only=True)):
+        if r_idx >= 200000:
+            break
+        rows.append(["" if cell is None else str(cell) for cell in row])
+
+    if not rows:
+        return [], []
+    header = [cell for cell in rows[0]]
+    body = [list(r) for r in rows[1:]]
+    return header, body
+
+
+def _write_xlsx(path: Path, header: list[str], body: list[list[str]]) -> None:
+    try:
+        import openpyxl  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise WorkflowError(f"openpyxl is required for Excel workflows: {type(exc).__name__}") from exc
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    if sheet is None:  # pragma: no cover
+        raise WorkflowError("Workbook did not provide an active sheet")
+    sheet.title = "cleaned"
+
+    sheet.append([cell for cell in header])
+    for row in body:
+        sheet.append([cell for cell in row])
+
+    try:
+        workbook.save(str(path))
+    except Exception as exc:
+        raise WorkflowError(f"Workbook save failed: {type(exc).__name__}") from exc
+
+
 def _write_csv(path: Path, header: list[str], body: list[list[str]]) -> None:
     output = io.StringIO()
     writer = csv.writer(output)
@@ -226,10 +276,18 @@ def run_workflow(
 
     source_path = validated_knowledge_item_path(item)
     ext = source_path.suffix.lower()
-    if ext not in {".csv", ".tsv"}:
-        raise WorkflowError("Only CSV/TSV workflows are supported in this implementation")
-
-    header, body = _read_csv_all_rows(source_path)
+    if ext in {".csv", ".tsv"}:
+        header, body = _read_csv_all_rows(source_path)
+        artifact_mime = "text/csv"
+        base_name = f"cleaned_{source_path.name}"
+        write_output = lambda dest, h, b: _write_csv(dest, h, b)
+    elif ext in {".xlsx", ".xlsm"}:
+        header, body = _read_xlsx_all_rows(source_path)
+        artifact_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        base_name = f"cleaned_{source_path.stem}.xlsx"
+        write_output = lambda dest, h, b: _write_xlsx(dest, h, b)
+    else:
+        raise WorkflowError("Only CSV/TSV/XLSX workflows are supported in this implementation")
     columns_before = list(header)
     rows_before = len(body)
 
@@ -254,17 +312,16 @@ def run_workflow(
 
     # Write artifact.
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    base_name = f"cleaned_{source_path.name}"
     artifact_path = _unique_destination(ARTIFACTS_DIR, base_name)
     artifact_path = _validated_under_root(artifact_path, ARTIFACTS_DIR)
 
-    _write_csv(artifact_path, header, body)
+    write_output(artifact_path, header, body)
 
     artifact = create_artifact(
         source_item_ids=[int(knowledge_item_id)],
         filename=artifact_path.name,
         stored_path=artifact_path,
-        mime_type="text/csv",
+        mime_type=artifact_mime,
         description=(
             "Cleaned dataset artifact generated from knowledge item "
             f"#{knowledge_item_id} using operations: {', '.join(operations)}"

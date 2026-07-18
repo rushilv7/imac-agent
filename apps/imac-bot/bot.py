@@ -7,16 +7,18 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from file_inbox import save_document
 from job_runner import JobRunner
-from pathlib import Path
+from natural_language import handle_natural_message
 
 # Allow importing the Phase 1 knowledge modules without packaging.
 KNOWLEDGE_DIR = Path("/home/rushil/projects/imac-agent/apps/knowledge")
 if str(KNOWLEDGE_DIR) not in sys.path:
     sys.path.insert(0, str(KNOWLEDGE_DIR))
+
 
 try:
     from ingest import ingest as knowledge_ingest  # type: ignore
@@ -46,6 +48,10 @@ except Exception:
     get_artifact = None
     list_artifacts = None
     KNOWLEDGE_ROOT_PATH = None
+
+handle_callback = None
+propose_plan = None
+
 from state_store import (
     approve_action,
     add_active_upload,
@@ -63,19 +69,15 @@ from state_store import (
     list_uploads,
     reject_action,
     set_active_uploads,
+    upsert_chat_context,
 )
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 ALLOWED_USER_ID_RAW = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "").strip()
 OPS_BASE_URL = "http://127.0.0.1:8787"
 
-if not BOT_TOKEN:
-    raise SystemExit("TELEGRAM_BOT_TOKEN is not configured")
-if not ALLOWED_USER_ID_RAW.isdigit():
-    raise SystemExit("TELEGRAM_ALLOWED_USER_ID must be a numeric Telegram user ID")
-
-ALLOWED_USER_ID = int(ALLOWED_USER_ID_RAW)
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+ALLOWED_USER_ID = int(ALLOWED_USER_ID_RAW) if ALLOWED_USER_ID_RAW.isdigit() else 0
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 
 ALLOWED_RESTARTS = {
     "imac-demo": "restart:imac-demo",
@@ -89,6 +91,8 @@ class BotError(RuntimeError):
 
 
 def telegram_request(method: str, payload: dict[str, Any] | None = None, *, timeout: int = 15) -> Any:
+    if not BOT_TOKEN or not TELEGRAM_API:
+        raise BotError("TELEGRAM_BOT_TOKEN is not configured")
     body = json.dumps(payload or {}).encode("utf-8")
     request = urllib.request.Request(
         f"{TELEGRAM_API}/{method}",
@@ -108,6 +112,9 @@ def telegram_request(method: str, payload: dict[str, Any] | None = None, *, time
     return data.get("result")
 
 
+# The remaining helper functions are preserved below.
+
+
 def ops_get(path: str) -> dict[str, Any]:
     request = urllib.request.Request(OPS_BASE_URL + path, headers={"Accept": "application/json"})
     try:
@@ -125,9 +132,20 @@ def send_message(chat_id: int, text: str) -> None:
         telegram_request("sendMessage", {"chat_id": chat_id, "text": chunk})
 
 
-def send_document_file(chat_id: int, path: Path, *, caption: str | None = None) -> None:
-    # Telegram requires multipart form upload for sendDocument.
-    # Keep this minimal and avoid logging paths or file contents.
+def send_message_with_keyboard(chat_id: int, text: str, keyboard: Any) -> None:
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+    if keyboard is not None:
+        # keyboard is InlineKeyboard dataclass.
+        payload["reply_markup"] = {
+            "inline_keyboard": [
+                [{"text": btn.text, "callback_data": btn.callback_data} for btn in row]
+                for row in keyboard.rows
+            ]
+        }
+    telegram_request("sendMessage", payload)
+
+
+def send_document_file(chat_id: int, path: Path, caption: str | None = None) -> None:
     boundary = f"----imac-bot-{secrets.token_hex(8)}"
     body_parts: list[bytes] = []
 
@@ -216,7 +234,9 @@ def help_text() -> str:
         "/enrich <id>\n/enrich_pending\n/enrichment_status\n"
         "/organize\n/artifacts\n/artifact <id>\n/send_artifact <id>\n"
         "/profile <knowledge-item-id>\n/prepare_clean <knowledge-item-id>\n"
-        "/workflow <knowledge-item-id> <operation1,operation2,...>"
+        "/workflow <knowledge-item-id> <operation1,operation2,...>\n"
+        "\nConversational:\n"
+        "Send a normal message (not starting with /) to propose a plan.\n"
     )
 
 
@@ -275,24 +295,11 @@ def command_repo() -> str:
     return "\n".join(lines)
 
 
-def format_job(job: dict[str, Any]) -> str:
-    lines = [
-        f"Job #{job['id']}",
-        f"Type: {job['kind']}",
-        f"Status: {job['status']}",
-        f"Created: {job['created_at']}",
-    ]
-    if job.get("result"):
-        lines.extend(["", str(job["result"])[:3000]])
-    if job.get("error"):
-        lines.extend(["", f"Error: {job['error']}"])
-    return "\n".join(lines)
-
-
 def queue_hermes(chat_id: int, question: str) -> str:
     if not question.strip():
         return "Usage: /ask <question>"
     job_id = create_job("hermes", chat_id, question.strip())
+    upsert_chat_context(chat_id=chat_id, user_id=ALLOWED_USER_ID, latest_job_id=job_id)
     return f"Hermes job #{job_id} queued.\nUse /job {job_id} or /jobs to check it."
 
 
@@ -337,6 +344,7 @@ def approve_code(chat_id: int, code: str) -> str:
     payload = json.dumps({"action_id": action["id"], "action_key": action["action_key"]})
     job_id = create_job("action", chat_id, payload)
     attach_action_job(int(action["id"]), job_id)
+    upsert_chat_context(chat_id=chat_id, user_id=ALLOWED_USER_ID, latest_job_id=job_id)
     return f"Approved. Action queued as job #{job_id}."
 
 
@@ -349,8 +357,8 @@ def list_actions_text(chat_id: int) -> str:
     )
 
 
-def list_uploads_text() -> str:
-    uploads = list_uploads(10)
+def list_uploads_text(chat_id: int | None = None) -> str:
+    uploads = list_uploads(10, chat_id=chat_id)
     if not uploads:
         return "No Telegram uploads yet."
     return "Recent uploads\n\n" + "\n".join(
@@ -550,6 +558,7 @@ def set_active_file(chat_id: int, argument: str) -> str:
     if not upload:
         return "Upload not found. Use /uploads to list."
     set_active_uploads(chat_id, [upload_id])
+    upsert_chat_context(chat_id=chat_id, user_id=ALLOWED_USER_ID, latest_upload_id=upload_id)
     return f"Active file set to upload #{upload_id}: {upload['original_name']}"
 
 
@@ -562,6 +571,7 @@ def add_active_file(chat_id: int, argument: str) -> str:
         return "Upload not found. Use /uploads to list."
     if not add_active_upload(chat_id, upload_id):
         return f"Upload #{upload_id} is already active."
+    upsert_chat_context(chat_id=chat_id, user_id=ALLOWED_USER_ID, latest_upload_id=upload_id)
     return f"Added active file upload #{upload_id}: {upload['original_name']}"
 
 
@@ -582,10 +592,15 @@ def handle_document(message: dict[str, Any], chat_id: int) -> None:
             bot_token=BOT_TOKEN,
         )
 
+        upsert_chat_context(chat_id=chat_id, user_id=ALLOWED_USER_ID, latest_upload_id=int(saved["upload_id"]))
+
         ingest_note = ""
         if knowledge_ingest is not None:
             try:
                 ingest_result = knowledge_ingest(saved["stored_path"])
+                kid = ingest_result.get("knowledge_item_id")
+                if isinstance(kid, int):
+                    upsert_chat_context(chat_id=chat_id, user_id=ALLOWED_USER_ID, latest_knowledge_item_id=kid)
                 ingest_note = (
                     f"Knowledge Item ID: #{ingest_result.get('knowledge_item_id')}\n"
                     f"Duplicate: {'yes' if ingest_result.get('duplicate') else 'no'}\n"
@@ -640,7 +655,21 @@ def handle_message(message: dict[str, Any]) -> None:
     command = raw_command.split("@", maxsplit=1)[0]
     argument = parts[1].strip() if len(parts) > 1 else ""
 
+    if command and not command.startswith("/"):
+        command = ""
+
     try:
+        if text.strip() and not text.strip().startswith("/"):
+            handled = handle_natural_message(
+                chat_id=chat_id,
+                user_id=ALLOWED_USER_ID,
+                text=text,
+                send_message=send_message,
+                send_document=lambda cid, path, cap=None: send_document_file(cid, path, cap),
+            )
+            if handled:
+                return
+
         if command in {"/start", "/help"}:
             response = help_text()
         elif command == "/health":
@@ -659,7 +688,7 @@ def handle_message(message: dict[str, Any]) -> None:
             response = "Usage: /job <id>"
             if argument.isdigit():
                 job = get_job(int(argument))
-                response = format_job(job) if job else "Job not found."
+                response = json.dumps(job, indent=2, sort_keys=True)[:3500] if job else "Job not found."
         elif command == "/cancel":
             response = "Usage: /cancel <queued-job-id>"
             if argument.isdigit():
@@ -677,7 +706,7 @@ def handle_message(message: dict[str, Any]) -> None:
                 result = reject_action(argument, chat_id)
                 response = "Action rejected." if result.get("ok") else f"Reject failed: {result.get('reason', 'unknown')}"
         elif command == "/uploads":
-            response = list_uploads_text()
+            response = list_uploads_text(chat_id)
         elif command in {"/file", "/files"}:
             response = list_active_files_text(chat_id)
         elif command == "/use_file":
@@ -778,7 +807,6 @@ def handle_message(message: dict[str, Any]) -> None:
                             f"Suggested: {item.get('suggested_path') or ''}"
                         )
         elif command == "/organize":
-            # Phase 1: propose organization for the most recent ingested item.
             if knowledge_list_newest is None or suggest_destination is None or allowed_destination_keys is None:
                 response = "Knowledge platform is not available."
             else:
@@ -847,19 +875,65 @@ def handle_message(message: dict[str, Any]) -> None:
     send_message(chat_id, response)
 
 
+def handle_update(update: dict[str, Any]) -> None:
+    if not isinstance(update, dict):
+        return
+    if isinstance(update.get("message"), dict):
+        handle_message(update["message"])  # type: ignore[arg-type]
+        return
+
+    if isinstance(update.get("callback_query"), dict):
+        if handle_callback is None:
+            return
+        cq = update["callback_query"]
+        from_user = cq.get("from") or {}
+        message = cq.get("message") or {}
+        chat = message.get("chat") or {}
+        if from_user.get("id") != ALLOWED_USER_ID:
+            return
+        if chat.get("type") != "private":
+            return
+        chat_id = chat.get("id")
+        if not isinstance(chat_id, int):
+            return
+        token = str(cq.get("data") or "").strip()
+        if not token:
+            return
+
+        # Answer callback to remove Telegram loading indicator.
+        try:
+            telegram_request("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "OK"})
+        except Exception:
+            pass
+
+        handle_callback(
+            callback_token=token,
+            chat_id=chat_id,
+            user_id=ALLOWED_USER_ID,
+            send_message=send_message,
+            send_document=lambda cid, path, cap=None: send_document_file(cid, _validated_path_under_knowledge_root(str(path)), cap),
+        )
+        return
+
+
 def main() -> None:
+    if not BOT_TOKEN:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is not configured")
+    if ALLOWED_USER_ID <= 0:
+        raise SystemExit("TELEGRAM_ALLOWED_USER_ID must be a numeric Telegram user ID")
+
     initialize()
     telegram_request("deleteWebhook", {"drop_pending_updates": False})
     bot = telegram_request("getMe")
     print(f"Connected to Telegram as @{bot.get('username', 'unknown')}", flush=True)
 
-    runner = JobRunner(send_message)
+    runner = JobRunner(send_message, send_document_file)
     runner.start()
 
     offset: int | None = None
     while True:
         try:
-            payload: dict[str, Any] = {"timeout": 50, "allowed_updates": ["message"]}
+            payload: dict[str, Any] = {"timeout": 50, "allowed_updates": ["message", "callback_query"]}
             if offset is not None:
                 payload["offset"] = offset
             updates = telegram_request("getUpdates", payload, timeout=60)
@@ -867,9 +941,7 @@ def main() -> None:
                 update_id = update.get("update_id")
                 if isinstance(update_id, int):
                     offset = update_id + 1
-                message = update.get("message")
-                if isinstance(message, dict):
-                    handle_message(message)
+                handle_update(update)
         except BotError as exc:
             print(f"Bot error: {exc}", file=sys.stderr, flush=True)
             time.sleep(5)

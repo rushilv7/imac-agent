@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -55,6 +56,7 @@ def initialize() -> None:
 
             CREATE TABLE IF NOT EXISTS uploads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
                 file_unique_id TEXT,
                 original_name TEXT NOT NULL,
                 stored_path TEXT NOT NULL,
@@ -76,8 +78,26 @@ def initialize() -> None:
             CREATE INDEX IF NOT EXISTS idx_actions_code ON actions(code);
             CREATE INDEX IF NOT EXISTS idx_uploads_created_at ON uploads(created_at);
             CREATE INDEX IF NOT EXISTS idx_active_uploads_chat ON active_uploads(chat_id);
+
+            CREATE TABLE IF NOT EXISTS chat_context (
+                chat_id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                latest_upload_id INTEGER,
+                latest_knowledge_item_id INTEGER,
+                latest_artifact_id INTEGER,
+                latest_job_id INTEGER,
+                latest_plan_id INTEGER,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chat_context_updated_at ON chat_context(updated_at);
             """
         )
+
+        # Lightweight migration: older databases may lack uploads.chat_id.
+        cols = {str(row["name"]) for row in connection.execute("PRAGMA table_info(uploads)").fetchall()}
+        if "chat_id" not in cols:
+            connection.execute("ALTER TABLE uploads ADD COLUMN chat_id INTEGER")
 
         connection.execute(
             """
@@ -393,6 +413,79 @@ def list_pending_actions(
     return [dict(row) for row in rows]
 
 
+def _get_newest_pending_action(chat_id: int) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM actions
+            WHERE chat_id = ? AND status = 'pending'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(chat_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def approve_newest_pending_action(*, chat_id: int, user_id: int) -> dict[str, Any]:
+    """Approve newest pending action for this chat without an approval code."""
+
+    now = datetime.now(timezone.utc)
+    action = _get_newest_pending_action(chat_id)
+    if not action:
+        return {"ok": False, "message": "No pending actions to approve."}
+
+    expires_at = datetime.fromisoformat(str(action["expires_at"]))
+    if expires_at <= now:
+        with _connect() as connection:
+            connection.execute(
+                "UPDATE actions SET status = 'expired' WHERE id = ?",
+                (int(action["id"]),),
+            )
+        return {"ok": False, "message": "That request expired. Please ask again."}
+
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE actions
+            SET status = 'approved'
+            WHERE id = ? AND status = 'pending'
+            """,
+            (int(action["id"]),),
+        )
+        if cursor.rowcount != 1:
+            return {"ok": False, "message": "Approval failed (action no longer pending)."}
+
+    payload = json.dumps({"action_id": int(action["id"]), "action_key": str(action["action_key"])})
+    job_id = create_job("action", int(chat_id), payload)
+    attach_action_job(int(action["id"]), int(job_id))
+    upsert_chat_context(chat_id=int(chat_id), user_id=int(user_id), latest_job_id=int(job_id))
+    return {"ok": True, "message": f"Approved. Action queued as job #{job_id}."}
+
+
+def reject_newest_pending_action(*, chat_id: int, user_id: int) -> dict[str, Any]:
+    """Reject newest pending action for this chat without an approval code."""
+
+    action = _get_newest_pending_action(chat_id)
+    if not action:
+        return {"ok": False, "message": "No pending actions to cancel."}
+
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE actions
+            SET status = 'rejected'
+            WHERE id = ? AND status = 'pending'
+            """,
+            (int(action["id"]),),
+        )
+        if cursor.rowcount != 1:
+            return {"ok": False, "message": "Cancel failed (action no longer pending)."}
+
+    upsert_chat_context(chat_id=int(chat_id), user_id=int(user_id))
+    return {"ok": True, "message": "Cancelled."}
+
+
 def record_upload(
     *,
     file_unique_id: str | None,
@@ -400,11 +493,13 @@ def record_upload(
     stored_path: str,
     mime_type: str | None,
     size_bytes: int,
+    chat_id: int | None = None,
 ) -> int:
     with _connect() as connection:
         cursor = connection.execute(
             """
             INSERT INTO uploads(
+                chat_id,
                 file_unique_id,
                 original_name,
                 stored_path,
@@ -412,9 +507,10 @@ def record_upload(
                 size_bytes,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                int(chat_id) if chat_id is not None else None,
                 file_unique_id,
                 original_name,
                 stored_path,
@@ -426,17 +522,28 @@ def record_upload(
         return int(cursor.lastrowid)
 
 
-def list_uploads(limit: int = 10) -> list[dict[str, Any]]:
+def list_uploads(limit: int = 10, *, chat_id: int | None = None) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 50))
     with _connect() as connection:
-        rows = connection.execute(
-            """
-            SELECT * FROM uploads
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if chat_id is None:
+            rows = connection.execute(
+                """
+                SELECT * FROM uploads
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """
+                SELECT * FROM uploads
+                WHERE chat_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(chat_id), limit),
+            ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -545,3 +652,90 @@ def list_active_uploads(chat_id: int, limit: int = 10) -> list[dict[str, Any]]:
             (chat_id, limit),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def upsert_chat_context(
+    *,
+    chat_id: int,
+    user_id: int,
+    latest_upload_id: int | None = None,
+    latest_knowledge_item_id: int | None = None,
+    latest_artifact_id: int | None = None,
+    latest_job_id: int | None = None,
+    latest_plan_id: int | None = None,
+) -> None:
+    now = _now()
+    with _connect() as connection:
+        existing = connection.execute(
+            "SELECT * FROM chat_context WHERE chat_id = ?",
+            (int(chat_id),),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO chat_context(
+                    chat_id,
+                    user_id,
+                    latest_upload_id,
+                    latest_knowledge_item_id,
+                    latest_artifact_id,
+                    latest_job_id,
+                    latest_plan_id,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(chat_id),
+                    int(user_id),
+                    latest_upload_id,
+                    latest_knowledge_item_id,
+                    latest_artifact_id,
+                    latest_job_id,
+                    latest_plan_id,
+                    now,
+                ),
+            )
+            return
+
+        def _coalesce(new: int | None, old: Any) -> int | None:
+            if new is not None:
+                return int(new)
+            return int(old) if old is not None else None
+
+        connection.execute(
+            """
+            UPDATE chat_context
+            SET user_id = ?,
+                latest_upload_id = ?,
+                latest_knowledge_item_id = ?,
+                latest_artifact_id = ?,
+                latest_job_id = ?,
+                latest_plan_id = ?,
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (
+                int(user_id),
+                _coalesce(latest_upload_id, existing["latest_upload_id"]),
+                _coalesce(latest_knowledge_item_id, existing["latest_knowledge_item_id"]),
+                _coalesce(latest_artifact_id, existing["latest_artifact_id"]),
+                _coalesce(latest_job_id, existing["latest_job_id"]),
+                _coalesce(latest_plan_id, existing["latest_plan_id"]),
+                now,
+                int(chat_id),
+            ),
+        )
+
+
+def get_chat_context(chat_id: int) -> dict[str, Any] | None:
+    initialize()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM chat_context WHERE chat_id = ?",
+            (int(chat_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+
